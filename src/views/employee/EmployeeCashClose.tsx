@@ -25,9 +25,12 @@ export function EmployeeCashClose() {
       else if (s.paymentMethod === 'transfer') transfer += s.total;
       else if (s.paymentMethod === 'qr') qr += s.total;
       else if (s.paymentMethod === 'credit') credit += s.total;
-      else if (s.paymentMethod === 'mixed') {
-        // Mixed payments are approximate - split evenly for demo
-        cash += s.total * 0.5; card += s.total * 0.5;
+      else if (s.paymentMethod === 'mixed' && s.mixedAmounts) {
+        cash += s.mixedAmounts.cash;
+        card += s.mixedAmounts.card;
+        transfer += s.mixedAmounts.transfer;
+        qr += s.mixedAmounts.qr;
+        credit += s.mixedAmounts.credit;
       }
     }
     return { cash, card, transfer, qr, credit, total: cash + card + transfer + qr + credit };

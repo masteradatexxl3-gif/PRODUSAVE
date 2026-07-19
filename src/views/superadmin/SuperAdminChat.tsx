@@ -3,7 +3,7 @@ import { ChatPanel } from '../../components/ChatPanel';
 
 export function SuperAdminChat() {
   const { threads } = useApp();
-  // Solo mostrar conversaciones con jefes y empleados (soporte técnico)
-  const supportThreads = threads.filter((t) => t.participantRole !== 'superadmin');
+  // Solo mostrar conversaciones con Jefes (Dueños de negocios) - soporte técnico
+  const supportThreads = threads.filter((t) => t.participantRole === 'boss');
   return <ChatPanel threads={supportThreads} title="Soporte Global" canQuickReply />;
 }

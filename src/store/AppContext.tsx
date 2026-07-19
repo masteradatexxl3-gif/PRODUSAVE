@@ -30,6 +30,7 @@ import type {
   StockMovement,
   CashClose,
   Plan,
+  MixedPayment,
 } from '../types';
 
 // ---- DB row types ----
@@ -139,7 +140,7 @@ interface AppContextValue {
   quickReplies: QuickReply[]; addQuickReply: (text: string) => void;
   cart: CartItem[]; addToCart: (p: Product) => void; updateCartItem: (i: number, it: Partial<CartItem>) => void;
   removeFromCart: (i: number) => void; clearCart: () => void;
-  checkout: (method: Sale['paymentMethod'], total: number) => void;
+  checkout: (method: Sale['paymentMethod'], total: number, mixedAmounts?: MixedPayment, customerName?: string) => Promise<{ saleId: string | null; error: string | null; items?: CartItem[]; total?: number; method?: Sale['paymentMethod']; mixedAmounts?: MixedPayment; tenant?: Tenant | null }>;
   addProduct: (p: Omit<Product, 'id' | 'createdAt'>) => void;
   updateProduct: (id: string, p: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
@@ -157,6 +158,7 @@ interface AppContextValue {
   completeTask: (id: string) => void;
   broadcastMessages: BroadcastMessage[]; addBroadcast: (title: string, message: string) => void;
   createEmployee: (name: string, email: string, password: string) => Promise<{ error: string | null }>;
+  createBoss: (name: string, email: string, password: string, businessName: string, plan: Tenant['plan']) => Promise<{ error: string | null }>;
   updateLastSeen: () => void;
   planLimit: number;
   stockMovements: StockMovement[]; addCashClose: (c: Omit<CashClose, 'id' | 'createdAt'>) => void;
@@ -306,11 +308,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const items = ((s as { sale_items?: SaleItemRow[] }).sale_items ?? []).map((si) => ({
             productId: si.product_id ?? '', name: '', price: si.price_at_sale, qty: si.quantity,
           }));
+          const rawMixed = (s as { mixed_amounts?: MixedPayment | null }).mixed_amounts;
           return {
             id: s.id, tenantId: s.tenant_id, employeeId: s.profile_id,
             employeeName: profsToMap.find((p) => p.id === s.profile_id)?.name ?? 'Desconocido',
             items, total: s.total,
             paymentMethod: (typeof s.payment_method === 'string' ? s.payment_method : 'cash') as Sale['paymentMethod'],
+            mixedAmounts: rawMixed ?? undefined,
             createdAt: s.created_at, shift: 'mañana',
           };
         });
@@ -412,47 +416,60 @@ export function AppProvider({ children }: { children: ReactNode }) {
   };
   const clearWarning = (id: string) => setWarnings((prev) => prev.filter((w) => w.id !== id));
 
-  const checkout = async (method: Sale['paymentMethod'], total: number) => {
+  const checkout = async (method: Sale['paymentMethod'], total: number, mixedAmounts?: MixedPayment, customerName?: string) => {
     const tenantId = currentUser.tenantId;
-    if (!tenantId) return;
+    if (!tenantId) return { saleId: null, error: 'Sin negocio activo' };
 
-    const { data: saleRow, error: saleErr } = await supabase.from('sales').insert({
-      tenant_id: tenantId, profile_id: currentUser.id, total,
-      payment_method: method, is_fiado: method === 'credit',
-    }).select().single();
-    if (saleErr || !saleRow) { console.error('Error checkout:', saleErr); return; }
-
-    const saleItems = cart.map((ci) => ({
-      sale_id: saleRow.id, product_id: ci.productId, quantity: ci.qty, price_at_sale: ci.price, original_price: ci.price,
-    }));
-    if (saleItems.length > 0) await supabase.from('sale_items').insert(saleItems);
-
-    for (const ci of cart) {
-      const prod = products.find((p) => p.id === ci.productId);
-      if (prod) {
-        const newStock = Math.max(0, prod.publishedStock - ci.qty);
-        await supabase.from('products').update({ published_stock: newStock, stock: newStock }).eq('id', ci.productId);
-        await supabase.from('stock_movements').insert({
-          tenant_id: tenantId, product_id: ci.productId, product_name: ci.name,
-          type: 'sale', quantity: ci.qty, user_id: currentUser.id, user_name: currentUser.name,
-        });
+    try {
+      const saleItemsSnapshot = [...cart];
+      const { data: saleRow, error: saleErr } = await supabase.from('sales').insert({
+        tenant_id: tenantId, profile_id: currentUser.id, total,
+        payment_method: method, is_fiado: method === 'credit',
+        mixed_amounts: method === 'mixed' ? mixedAmounts : null,
+        customer_name: customerName ?? null,
+      }).select().single();
+      if (saleErr || !saleRow) {
+        console.error('Error checkout:', saleErr);
+        return { saleId: null, error: saleErr?.message ?? 'Error al registrar venta' };
       }
+
+      const saleItems = saleItemsSnapshot.map((ci) => ({
+        sale_id: saleRow.id, product_id: ci.productId, quantity: ci.qty, price_at_sale: ci.price, original_price: ci.price,
+      }));
+      if (saleItems.length > 0) await supabase.from('sale_items').insert(saleItems);
+
+      for (const ci of saleItemsSnapshot) {
+        const prod = products.find((p) => p.id === ci.productId);
+        if (prod) {
+          const newStock = Math.max(0, prod.publishedStock - ci.qty);
+          await supabase.from('products').update({ published_stock: newStock, stock: newStock }).eq('id', ci.productId);
+          await supabase.from('stock_movements').insert({
+            tenant_id: tenantId, product_id: ci.productId, product_name: ci.name,
+            type: 'sale', quantity: ci.qty, user_id: currentUser.id, user_name: currentUser.name,
+          });
+        }
+      }
+      setProducts((prev) => prev.map((p) => {
+        const ci = saleItemsSnapshot.find((c) => c.productId === p.id);
+        if (!ci) return p;
+        const newStock = Math.max(0, p.publishedStock - ci.qty);
+        return { ...p, publishedStock: newStock, stock: newStock };
+      }));
+      setStockMovements((prev) => [
+        ...saleItemsSnapshot.map((ci) => ({
+          id: `sm-${Date.now()}-${ci.productId}`, tenantId, productId: ci.productId, productName: ci.name,
+          type: 'sale' as const, quantity: ci.qty, userName: currentUser.name, createdAt: new Date().toISOString(),
+        })),
+        ...prev,
+      ]);
+      setCart([]);
+      refreshData();
+      return { saleId: saleRow.id, error: null, items: saleItemsSnapshot, total, method, mixedAmounts, tenant: currentTenant };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Error de red al registrar venta';
+      console.error('Checkout network error:', e);
+      return { saleId: null, error: msg };
     }
-    setProducts((prev) => prev.map((p) => {
-      const ci = cart.find((c) => c.productId === p.id);
-      if (!ci) return p;
-      const newStock = Math.max(0, p.publishedStock - ci.qty);
-      return { ...p, publishedStock: newStock, stock: newStock };
-    }));
-    setStockMovements((prev) => [
-      ...cart.map((ci) => ({
-        id: `sm-${Date.now()}-${ci.productId}`, tenantId, productId: ci.productId, productName: ci.name,
-        type: 'sale' as const, quantity: ci.qty, userName: currentUser.name, createdAt: new Date().toISOString(),
-      })),
-      ...prev,
-    ]);
-    setCart([]);
-    refreshData();
   };
 
   const addProduct = async (p: Omit<Product, 'id' | 'createdAt'>) => {
@@ -594,16 +611,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const createEmployee = async (name: string, email: string, password: string): Promise<{ error: string | null }> => {
     if (!currentTenant) return { error: 'Sin negocio activo' };
     if (profiles.length >= planLimit) return { error: `Límite del plan alcanzado (${planLimit} empleados)` };
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) return { error: error.message };
-    if (data.user) {
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) return { error: error.message };
+      if (data.user) {
+        const { error: pErr } = await supabase.from('profiles').insert({
+          id: data.user.id, tenant_id: currentTenant.id, name, role: 'employee',
+        });
+        if (pErr) return { error: pErr.message };
+        setProfiles((prev) => [...prev, mapProfile({ id: data.user!.id, tenant_id: currentTenant.id, name, role: 'employee', active: true, last_seen_at: null, created_at: new Date().toISOString() }, email)]);
+      }
+      return { error: null };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Error de red al crear empleado' };
+    }
+  };
+
+  const createBoss = async (name: string, email: string, password: string, businessName: string, plan: Tenant['plan']): Promise<{ error: string | null }> => {
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) return { error: error.message };
+      if (!data.user) return { error: 'No se pudo crear el usuario' };
+      const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+      const { data: tenantRow, error: tErr } = await supabase.from('tenants').insert({
+        name: businessName, slug: businessName.toLowerCase().replace(/\s+/g, '-'),
+        primary_color: '#5865F2', accent_color: '#5865F2', logo_emoji: '🛒',
+        status: 'active', plan, subscription_expires_at: expiresAt,
+      }).select().single();
+      if (tErr || !tenantRow) return { error: tErr?.message ?? 'Error al crear negocio' };
       const { error: pErr } = await supabase.from('profiles').insert({
-        id: data.user.id, tenant_id: currentTenant.id, name, role: 'employee',
+        id: data.user.id, tenant_id: tenantRow.id, name, role: 'boss',
       });
       if (pErr) return { error: pErr.message };
-      setProfiles((prev) => [...prev, mapProfile({ id: data.user!.id, tenant_id: currentTenant.id, name, role: 'employee', active: true, last_seen_at: null, created_at: new Date().toISOString() }, email)]);
+      setTenants((prev) => [mapTenant(tenantRow as TenantRow), ...prev]);
+      setProfiles((prev) => [...prev, mapProfile({ id: data.user!.id, tenant_id: tenantRow.id, name, role: 'boss', active: true, last_seen_at: null, created_at: new Date().toISOString() }, email)]);
+      return { error: null };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Error de red al crear jefe' };
     }
-    return { error: null };
   };
 
   const addCashClose = async (c: Omit<CashClose, 'id' | 'createdAt'>) => {
@@ -624,7 +669,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     checkout, addProduct, updateProduct, deleteProduct, massRemark, publishToCaja,
     addReception, addCredit, toggleTenantStatus, threads, messages, sendMessage,
     warnings, pushWarning, clearWarning, loading,
-    tasks, addTask, completeTask, broadcastMessages, addBroadcast, createEmployee,
+    tasks, addTask, completeTask, broadcastMessages, addBroadcast, createEmployee, createBoss,
     updateLastSeen, planLimit, stockMovements, addCashClose, cashCloses, refreshData,
   };
 

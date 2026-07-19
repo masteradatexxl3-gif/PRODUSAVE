@@ -81,6 +81,7 @@ export interface Sale {
   items: CartItem[];
   total: number;
   paymentMethod: PaymentMethod;
+  mixedAmounts?: MixedPayment;
   createdAt: string;
   shift: string;
 }

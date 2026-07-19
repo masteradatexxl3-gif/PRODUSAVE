@@ -42,11 +42,13 @@ function useDaysLeft(expiresAt?: string | null) {
 }
 
 export function SuperAdminClients() {
-  const { tenants, users, toggleTenantStatus, updateTenantBranding } = useApp();
+  const { tenants, users, toggleTenantStatus, updateTenantBranding, createBoss } = useApp();
   const [query, setQuery] = useState('');
   const [newOpen, setNewOpen] = useState(false);
   const [brandingTenant, setBrandingTenant] = useState<Tenant | null>(null);
-  const [form, setForm] = useState({ name: '', owner: '', email: '', plan: 'version_de_prueba' });
+  const [form, setForm] = useState({ name: '', owner: '', email: '', password: '', plan: 'version_de_prueba' });
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const filtered = tenants.filter(
     (t) =>
@@ -57,6 +59,17 @@ export function SuperAdminClients() {
   const totalEmployees = tenants.reduce((a, t) => a + t.employeeCount, 0);
   const activeTenants = tenants.filter((t) => t.status === 'active').length;
   const totalRevenue = tenants.reduce((a, t) => a + t.monthlyRevenue, 0);
+
+  const handleCreate = async () => {
+    if (!form.name || !form.owner || !form.email || !form.password) return;
+    setCreating(true);
+    setCreateError(null);
+    const { error } = await createBoss(form.owner, form.email, form.password, form.name, form.plan as Tenant['plan']);
+    setCreating(false);
+    if (error) { setCreateError(error); return; }
+    setForm({ name: '', owner: '', email: '', password: '', plan: 'version_de_prueba' });
+    setNewOpen(false);
+  };
 
   return (
     <div className="view-enter">
@@ -137,15 +150,21 @@ export function SuperAdminClients() {
         <div className="space-y-4">
           <Field label="Nombre del negocio"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="input" placeholder="Almacén Don José" /></Field>
           <Field label="Nombre del dueño"><input value={form.owner} onChange={(e) => setForm({ ...form, owner: e.target.value })} className="input" placeholder="José Pérez" /></Field>
-          <Field label="Email"><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="input" placeholder="jose@negocio.com" /></Field>
+          <Field label="Email"><input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="input" placeholder="jose@negocio.com" /></Field>
+          <Field label="Contraseña inicial"><input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="input" placeholder="Mínimo 6 caracteres" /></Field>
           <Field label="Plan">
             <select value={form.plan} onChange={(e) => setForm({ ...form, plan: e.target.value })} className="input">
-              <option value="version_de_prueba">Versión de Prueba</option>
+              <option value="version_de_prueba">Versión de Prueba (14 días)</option>
               <option value="pro">Pro</option>
               <option value="enterprise">Enterprise</option>
             </select>
           </Field>
-          <button onClick={() => setNewOpen(false)} className="w-full py-2.5 rounded-xl btn-brand font-semibold">Crear cliente</button>
+          {createError && (
+            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-sm text-red-400">{createError}</div>
+          )}
+          <button onClick={handleCreate} disabled={creating || !form.name || !form.owner || !form.email || !form.password} className="w-full py-2.5 rounded-xl btn-brand font-semibold disabled:opacity-40 flex items-center justify-center gap-2">
+            {creating ? <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Creando...</> : 'Crear cliente'}
+          </button>
         </div>
       </Modal>
 
