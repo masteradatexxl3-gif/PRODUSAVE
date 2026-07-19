@@ -1,0 +1,81 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand-primary: #5865F2;
+  --brand-accent: #5865F2;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar Discord-style */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #72767d;
+}
+
+/* Light mode scrollbar */
+html:not(.dark) ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+html:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Brand utility classes driven by CSS vars */
+.btn-brand {
+  background-color: var(--brand-primary);
+  color: white;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+.btn-brand:hover {
+  filter: brightness(1.1);
+}
+.btn-brand:active {
+  transform: scale(0.98);
+}
+
+.text-brand {
+  color: var(--brand-primary);
+}
+
+.bg-brand {
+  background-color: var(--brand-primary);
+}
+
+.border-brand {
+  border-color: var(--brand-primary);
+}
+
+.ring-brand {
+  --tw-ring-color: var(--brand-primary);
+}
+
+/* Smooth view transition */
+.view-enter {
+  animation: fadeIn 0.2s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
