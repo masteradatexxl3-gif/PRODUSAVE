@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, ScanLine, Trash2, ShoppingCart, AlertTriangle, PackagePlus, Camera } from 'lucide-react';
+import { Search, ScanLine, Trash2, ShoppingCart, AlertTriangle, PackagePlus, Camera, Ticket, X, Check } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
 
 import { CheckoutModal } from './CheckoutModal';
@@ -7,10 +7,10 @@ import { QuickProductModal } from './QuickProductModal';
 import { CartItemEditor } from './CartItemEditor';
 import { BarcodeCameraModal } from './BarcodeCameraModal';
 import { InfoHint } from '../../components/ui/InfoHint';
-import type { Product } from '../../types';
+import type { Product, CouponCode } from '../../types';
 
 export function EmployeePOS() {
-  const { products, categories, cart, addToCart, removeFromCart, updateCartItem, currentUser } = useApp();
+  const { products, categories, cart, addToCart, removeFromCart, updateCartItem, currentUser, applyCoupon, employeePermissions } = useApp();
   const [query, setQuery] = useState('');
   const [activeCat, setActiveCat] = useState<string>('all');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
@@ -18,8 +18,15 @@ export function EmployeePOS() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<number | null>(null);
   const [scanFlash, setScanFlash] = useState<string | null>(null);
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<CouponCode | null>(null);
+  const [discountAmount, setDiscountAmount] = useState(0);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [couponLoading, setCouponLoading] = useState(false);
   const barcodeBuffer = useRef('');
   const barcodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const canDiscount = employeePermissions.find((p) => p.profileId === currentUser.id)?.canDiscount ?? false;
 
   // USB barcode scanner: detects rapid key inputs ending with Enter
   useEffect(() => {
@@ -69,6 +76,25 @@ export function EmployeePOS() {
 
   const subtotal = cart.reduce((a, i) => a + (i.priceOverride ?? i.price) * i.qty, 0);
   const totalItems = cart.reduce((a, i) => a + i.qty, 0);
+  const total = Math.max(0, subtotal - discountAmount);
+
+  const handleApplyCoupon = async () => {
+    if (!couponInput) return;
+    setCouponLoading(true);
+    setCouponError(null);
+    const { coupon, discountAmount: disc, error } = await applyCoupon(couponInput, subtotal);
+    setCouponLoading(false);
+    if (error) { setCouponError(error); setAppliedCoupon(null); setDiscountAmount(0); return; }
+    setAppliedCoupon(coupon);
+    setDiscountAmount(disc);
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setDiscountAmount(0);
+    setCouponInput('');
+    setCouponError(null);
+  };
 
   return (
     <div className="view-enter flex gap-4 h-[calc(100vh-7rem)]">
@@ -194,9 +220,54 @@ export function EmployeePOS() {
             <span>Artículos: {totalItems}</span>
             <span>Subtotal: ${subtotal.toLocaleString()}</span>
           </div>
+
+          {/* Coupon input */}
+          {canDiscount && (
+            <div className="pt-2">
+              {appliedCoupon ? (
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                  <div className="flex items-center gap-2">
+                    <Ticket size={14} className="text-emerald-400" />
+                    <div>
+                      <p className="text-xs font-bold text-emerald-400">{appliedCoupon.code}</p>
+                      <p className="text-[10px] text-gray-400">-{appliedCoupon.discountPercent}% · -${discountAmount.toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <button onClick={handleRemoveCoupon} className="text-gray-400 hover:text-red-400"><X size={14} /></button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-black/5 dark:bg-black/30 flex-1">
+                    <Ticket size={14} className="text-gray-400" />
+                    <input
+                      value={couponInput}
+                      onChange={(e) => { setCouponInput(e.target.value.toUpperCase()); setCouponError(null); }}
+                      placeholder="Cupón"
+                      className="bg-transparent outline-none flex-1 text-xs text-gray-700 dark:text-gray-200"
+                    />
+                  </div>
+                  <button
+                    onClick={handleApplyCoupon}
+                    disabled={!couponInput || couponLoading}
+                    className="px-3 py-2 rounded-xl bg-[#5865F2] hover:bg-[#4752c4] text-white text-xs font-semibold disabled:opacity-40 flex items-center gap-1"
+                  >
+                    {couponLoading ? <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Check size={14} />}
+                  </button>
+                </div>
+              )}
+              {couponError && <p className="text-[10px] text-red-400 mt-1">{couponError}</p>}
+            </div>
+          )}
+
+          {discountAmount > 0 && (
+            <div className="flex justify-between text-sm text-emerald-400">
+              <span>Descuento</span>
+              <span>-${discountAmount.toLocaleString()}</span>
+            </div>
+          )}
           <div className="flex justify-between items-baseline">
             <span className="text-sm text-gray-500">Total</span>
-            <span className="text-2xl font-bold text-gray-900 dark:text-white">${subtotal.toLocaleString()}</span>
+            <span className="text-2xl font-bold text-gray-900 dark:text-white">${total.toLocaleString()}</span>
           </div>
           <button
             onClick={() => setCheckoutOpen(true)}
@@ -209,7 +280,7 @@ export function EmployeePOS() {
         </div>
       </div>
 
-      <CheckoutModal open={checkoutOpen} onClose={() => setCheckoutOpen(false)} total={subtotal} />
+      <CheckoutModal open={checkoutOpen} onClose={() => { setCheckoutOpen(false); handleRemoveCoupon(); }} total={total} />
       <QuickProductModal open={quickOpen} onClose={() => setQuickOpen(false)} />
       <BarcodeCameraModal open={cameraOpen} onClose={() => setCameraOpen(false)} onScan={handleCameraScan} />
       <CartItemEditor

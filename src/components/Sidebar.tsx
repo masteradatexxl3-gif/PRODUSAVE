@@ -16,6 +16,7 @@ import {
   ListChecks,
   Megaphone,
   Calculator,
+  Ticket,
   X,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -37,6 +38,7 @@ export type ViewId =
   | 'boss-tasks'
   | 'boss-employees'
   | 'boss-stock-history'
+  | 'boss-coupons'
   | 'emp-pos'
   | 'emp-history'
   | 'emp-chat'
@@ -64,6 +66,7 @@ const NAV: Record<Role, NavItem[]> = {
     { id: 'boss-tasks', label: 'Tareas de Reposición', icon: ListChecks },
     { id: 'boss-stock-history', label: 'Movimientos de Stock', icon: History },
     { id: 'boss-employees', label: 'Gestión de Empleados', icon: Users },
+    { id: 'boss-coupons', label: 'Cupones de Descuento', icon: Ticket },
     { id: 'boss-credits', label: 'Fiados y Alertas', icon: CreditCard },
     { id: 'boss-chat', label: 'Chat Interno', icon: MessageSquare },
   ],

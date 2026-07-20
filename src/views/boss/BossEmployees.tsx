@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Users, Plus, AlertCircle, Clock } from 'lucide-react';
+import { Users, Plus, AlertCircle, Clock, Eye, Percent } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
 import { Modal } from '../../components/ui/Modal';
 
 export function BossEmployees() {
-  const { profiles, createEmployee, currentTenant, planLimit } = useApp();
+  const { profiles, createEmployee, currentTenant, planLimit, employeePermissions, updateEmployeePermissions } = useApp();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState<string | null>(null);
@@ -61,9 +61,25 @@ export function BossEmployees() {
               </div>
               <span className={`w-2.5 h-2.5 rounded-full ${emp.online ? 'bg-emerald-400' : 'bg-gray-500'}`} />
             </div>
-            <div className="flex items-center gap-2 text-xs text-gray-400">
+            <div className="flex items-center gap-2 text-xs text-gray-400 mb-3">
               <Clock size={12} />
               <span>Última conexión: {emp.lastSeen}</span>
+            </div>
+            {/* Permission matrix */}
+            <div className="pt-3 border-t border-black/5 dark:border-white/5 space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Permisos</p>
+              <PermissionToggle
+                icon={Percent}
+                label="Aplicar descuentos"
+                checked={employeePermissions.find((p) => p.profileId === emp.id)?.canDiscount ?? false}
+                onChange={async (v) => await updateEmployeePermissions(emp.id, { canDiscount: v })}
+              />
+              <PermissionToggle
+                icon={Eye}
+                label="Ver costo de compra"
+                checked={employeePermissions.find((p) => p.profileId === emp.id)?.canSeeCost ?? false}
+                onChange={async (v) => await updateEmployeePermissions(emp.id, { canSeeCost: v })}
+              />
             </div>
           </div>
         ))}
@@ -100,5 +116,21 @@ export function BossEmployees() {
         <style>{`.input{width:100%;padding:.625rem .75rem;border-radius:.75rem;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.1);color:inherit;outline:none}.dark .input{background:rgba(0,0,0,.3);border-color:rgba(255,255,255,.1);color:#fff}`}</style>
       </Modal>
     </div>
+  );
+}
+
+function PermissionToggle({ icon: Icon, label, checked, onChange }: { icon: typeof Eye; label: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-2.5 cursor-pointer group">
+      <button
+        type="button"
+        onClick={() => onChange(!checked)}
+        className={`relative w-9 h-5 rounded-full transition ${checked ? 'bg-[#5865F2]' : 'bg-gray-300 dark:bg-gray-600'}`}
+      >
+        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+      </button>
+      <Icon size={14} className={checked ? 'text-[#5865F2]' : 'text-gray-400'} />
+      <span className={`text-xs font-medium ${checked ? 'text-gray-900 dark:text-white' : 'text-gray-500'}`}>{label}</span>
+    </label>
   );
 }

@@ -31,6 +31,9 @@ import type {
   CashClose,
   Plan,
   MixedPayment,
+  CouponCode,
+  AuditLog,
+  EmployeePermissions,
 } from '../types';
 
 // ---- DB row types ----
@@ -158,7 +161,18 @@ interface AppContextValue {
   completeTask: (id: string) => void;
   broadcastMessages: BroadcastMessage[]; addBroadcast: (title: string, message: string) => void;
   createEmployee: (name: string, email: string, password: string) => Promise<{ error: string | null }>;
-  createBoss: (name: string, email: string, password: string, businessName: string, plan: Tenant['plan']) => Promise<{ error: string | null }>;
+  createBoss: (name: string, email: string, password: string, businessName: string, plan: Tenant['plan'], trialDays?: number) => Promise<{ error: string | null }>;
+  updateEmployee: (profileId: string, updates: { role?: Role; active?: boolean }) => Promise<{ error: string | null }>;
+  toggleTenantStatusWithTrial: (id: string, status: Tenant['status'], trialDays?: number) => Promise<{ error: string | null }>;
+  impersonateTenant: (tenantId: string) => void;
+  stopImpersonation: () => void;
+  impersonating: boolean;
+  coupons: CouponCode[]; addCoupon: (c: Omit<CouponCode, 'id' | 'createdAt' | 'updatedAt' | 'usedCount'>) => Promise<{ error: string | null }>;
+  updateCoupon: (id: string, updates: Partial<CouponCode>) => Promise<{ error: string | null }>;
+  deleteCoupon: (id: string) => Promise<{ error: string | null }>;
+  applyCoupon: (code: string, cartTotal: number) => Promise<{ coupon: CouponCode | null; discountAmount: number; error: string | null }>;
+  auditLogs: AuditLog[]; addAuditLog: (action: string, entityType?: string, entityId?: string, details?: Record<string, unknown>) => void;
+  employeePermissions: EmployeePermissions[]; updateEmployeePermissions: (profileId: string, perms: Partial<Pick<EmployeePermissions, 'canDiscount' | 'canSeeCost'>>) => Promise<{ error: string | null }>;
   updateLastSeen: () => void;
   planLimit: number;
   stockMovements: StockMovement[]; addCashClose: (c: Omit<CashClose, 'id' | 'createdAt'>) => void;
@@ -190,6 +204,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [warnings, setWarnings] = useState<{ id: string; text: string; time: string }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [coupons, setCoupons] = useState<CouponCode[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [employeePermissions, setEmployeePermissions] = useState<EmployeePermissions[]>([]);
+  const [impersonating, setImpersonating] = useState(false);
+  const [impersonatedTenantId, setImpersonatedTenantId] = useState<string | null>(null);
   const lastSeenTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const currentUser = useMemo(() => {
@@ -201,8 +220,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [authUser]);
 
   const currentTenant = useMemo(
-    () => (currentUser.role === 'superadmin' ? null : tenants.find((t) => t.id === currentUser.tenantId) ?? null),
-    [currentUser, tenants]
+    () => {
+      if (impersonating && impersonatedTenantId) return tenants.find((t) => t.id === impersonatedTenantId) ?? null;
+      if (currentUser.role === 'superadmin') return null;
+      return tenants.find((t) => t.id === currentUser.tenantId) ?? null;
+    },
+    [currentUser, tenants, impersonating, impersonatedTenantId]
   );
 
   const planLimit = useMemo(() => {
@@ -354,6 +377,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } else {
         setMessages({});
       }
+
+      // Coupons
+      let couponQuery = supabase.from('discount_coupons').select('*');
+      if (!isSuperAdmin) couponQuery = couponQuery.eq('tenant_id', tenantId);
+      const { data: couponData } = await couponQuery.order('created_at', { ascending: false });
+      setCoupons((couponData ?? []).map((c) => ({
+        id: c.id, tenantId: c.tenant_id, code: c.code, description: c.description ?? undefined,
+        discountPercent: Number(c.discount_percent), maxUses: c.max_uses, usedCount: c.used_count,
+        active: c.active, createdBy: c.created_by, createdAt: c.created_at, updatedAt: c.updated_at,
+      })));
+
+      // Audit logs
+      let auditQuery = supabase.from('audit_logs').select('*');
+      if (!isSuperAdmin) auditQuery = auditQuery.eq('tenant_id', tenantId);
+      const { data: auditData } = await auditQuery.order('created_at', { ascending: false }).limit(200);
+      setAuditLogs((auditData ?? []).map((a) => ({
+        id: a.id, tenantId: a.tenant_id, userId: a.user_id, userName: a.user_name,
+        action: a.action, entityType: a.entity_type, entityId: a.entity_id,
+        details: a.details, createdAt: a.created_at,
+      })));
+
+      // Employee permissions
+      let permQuery = supabase.from('employee_permissions').select('*');
+      if (!isSuperAdmin) permQuery = permQuery.eq('tenant_id', tenantId);
+      const { data: permData } = await permQuery;
+      setEmployeePermissions((permData ?? []).map((p) => ({
+        id: p.id, tenantId: p.tenant_id, profileId: p.profile_id,
+        canDiscount: p.can_discount, canSeeCost: p.can_see_cost, updatedAt: p.updated_at,
+      })));
     } catch (e) {
       console.error('Error cargando datos:', e);
     } finally {
@@ -608,47 +660,67 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (data) setBroadcastMessages((prev) => [mapBroadcast(data as BroadcastRow), ...prev]);
   };
 
-  const createEmployee = async (name: string, email: string, password: string): Promise<{ error: string | null }> => {
-    if (!currentTenant) return { error: 'Sin negocio activo' };
-    if (profiles.length >= planLimit) return { error: `Límite del plan alcanzado (${planLimit} empleados)` };
+  const callAdminAction = async (body: Record<string, unknown>): Promise<{ error: string | null; data?: Record<string, unknown> }> => {
     try {
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      if (error) return { error: error.message };
-      if (data.user) {
-        const { error: pErr } = await supabase.from('profiles').insert({
-          id: data.user.id, tenant_id: currentTenant.id, name, role: 'employee',
-        });
-        if (pErr) return { error: pErr.message };
-        setProfiles((prev) => [...prev, mapProfile({ id: data.user!.id, tenant_id: currentTenant.id, name, role: 'employee', active: true, last_seen_at: null, created_at: new Date().toISOString() }, email)]);
+      const { data: session } = await supabase.auth.getSession();
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-actions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.session?.access_token ?? ''}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        return { error: errBody.error ?? `Error ${res.status}` };
       }
-      return { error: null };
+      const data = await res.json();
+      if (data.error) return { error: data.error };
+      return { error: null, data };
     } catch (e) {
-      return { error: e instanceof Error ? e.message : 'Error de red al crear empleado' };
+      return { error: e instanceof Error ? e.message : 'Error de red' };
     }
   };
 
-  const createBoss = async (name: string, email: string, password: string, businessName: string, plan: Tenant['plan']): Promise<{ error: string | null }> => {
-    try {
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      if (error) return { error: error.message };
-      if (!data.user) return { error: 'No se pudo crear el usuario' };
-      const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-      const { data: tenantRow, error: tErr } = await supabase.from('tenants').insert({
-        name: businessName, slug: businessName.toLowerCase().replace(/\s+/g, '-'),
-        primary_color: '#5865F2', accent_color: '#5865F2', logo_emoji: '🛒',
-        status: 'active', plan, subscription_expires_at: expiresAt,
-      }).select().single();
-      if (tErr || !tenantRow) return { error: tErr?.message ?? 'Error al crear negocio' };
-      const { error: pErr } = await supabase.from('profiles').insert({
-        id: data.user.id, tenant_id: tenantRow.id, name, role: 'boss',
-      });
-      if (pErr) return { error: pErr.message };
-      setTenants((prev) => [mapTenant(tenantRow as TenantRow), ...prev]);
-      setProfiles((prev) => [...prev, mapProfile({ id: data.user!.id, tenant_id: tenantRow.id, name, role: 'boss', active: true, last_seen_at: null, created_at: new Date().toISOString() }, email)]);
-      return { error: null };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : 'Error de red al crear jefe' };
-    }
+  const createEmployee = async (name: string, email: string, password: string): Promise<{ error: string | null }> => {
+    if (!currentTenant) return { error: 'Sin negocio activo' };
+    if (profiles.length >= planLimit) return { error: `Límite del plan alcanzado (${planLimit} empleados)` };
+    const { error } = await callAdminAction({
+      action: 'create_employee', name, email, password, tenantId: currentTenant.id,
+    });
+    if (error) return { error };
+    refreshData();
+    return { error: null };
+  };
+
+  const createBoss = async (name: string, email: string, password: string, businessName: string, plan: Tenant['plan'], trialDays?: number): Promise<{ error: string | null }> => {
+    const { error } = await callAdminAction({
+      action: 'create_boss', name, email, password, businessName, plan, trialDays,
+    });
+    if (error) return { error };
+    refreshData();
+    return { error: null };
+  };
+
+  const updateEmployee = async (profileId: string, updates: { role?: Role; active?: boolean }): Promise<{ error: string | null }> => {
+    const { error } = await callAdminAction({ action: 'update_employee', profileId, role: updates.role, active: updates.active });
+    if (error) return { error };
+    setProfiles((prev) => prev.map((p) => p.id === profileId ? { ...p, ...(updates.role ? { role: updates.role } : {}), ...(updates.active !== undefined ? { active: updates.active } : {}) } : p));
+    return { error: null };
+  };
+
+  const toggleTenantStatusWithTrial = async (id: string, status: Tenant['status'], trialDays?: number): Promise<{ error: string | null }> => {
+    const { error } = await callAdminAction({ action: 'toggle_tenant', tenantId: id, status, trialDays });
+    if (error) return { error };
+    setTenants((prev) => prev.map((t) => t.id === id ? { ...t, status, subscriptionExpiresAt: trialDays ? new Date(Date.now() + trialDays * 86400000).toISOString() : t.subscriptionExpiresAt } : t));
+    return { error: null };
+  };
+
+  const impersonateTenant = (tenantId: string) => {
+    setImpersonatedTenantId(tenantId);
+    setImpersonating(true);
+  };
+  const stopImpersonation = () => {
+    setImpersonating(false);
+    setImpersonatedTenantId(null);
   };
 
   const addCashClose = async (c: Omit<CashClose, 'id' | 'createdAt'>) => {
@@ -660,6 +732,94 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }).select().single();
     if (error) { console.error('Error cash close:', error); return; }
     if (data) setCashCloses((prev) => [{ ...c, id: data.id, createdAt: data.created_at }, ...prev]);
+    addAuditLog('cash_close', 'cash_close', data.id, { type: c.type, difference: c.difference });
+  };
+
+  const addCoupon = async (c: Omit<CouponCode, 'id' | 'createdAt' | 'updatedAt' | 'usedCount'>): Promise<{ error: string | null }> => {
+    const { data, error } = await supabase.from('discount_coupons').insert({
+      tenant_id: c.tenantId, code: c.code.toUpperCase(), description: c.description ?? null,
+      discount_percent: c.discountPercent, max_uses: c.maxUses ?? null, active: true, created_by: currentUser.id,
+    }).select().single();
+    if (error) return { error: error.message };
+    if (data) setCoupons((prev) => [{
+      id: data.id, tenantId: data.tenant_id, code: data.code, description: data.description ?? undefined,
+      discountPercent: Number(data.discount_percent), maxUses: data.max_uses, usedCount: data.used_count,
+      active: data.active, createdBy: data.created_by, createdAt: data.created_at, updatedAt: data.updated_at,
+    }, ...prev]);
+    addAuditLog('coupon_created', 'coupon', data?.id, { code: c.code });
+    return { error: null };
+  };
+
+  const updateCoupon = async (id: string, updates: Partial<CouponCode>): Promise<{ error: string | null }> => {
+    const dbUpdates: Record<string, unknown> = {};
+    if (updates.code !== undefined) dbUpdates.code = updates.code.toUpperCase();
+    if (updates.discountPercent !== undefined) dbUpdates.discount_percent = updates.discountPercent;
+    if (updates.maxUses !== undefined) dbUpdates.max_uses = updates.maxUses;
+    if (updates.active !== undefined) dbUpdates.active = updates.active;
+    if (updates.description !== undefined) dbUpdates.description = updates.description;
+    dbUpdates.updated_at = new Date().toISOString();
+    const { error } = await supabase.from('discount_coupons').update(dbUpdates).eq('id', id);
+    if (error) return { error: error.message };
+    setCoupons((prev) => prev.map((c) => c.id === id ? { ...c, ...updates } : c));
+    addAuditLog('coupon_updated', 'coupon', id, updates);
+    return { error: null };
+  };
+
+  const deleteCoupon = async (id: string): Promise<{ error: string | null }> => {
+    const { error } = await supabase.from('discount_coupons').delete().eq('id', id);
+    if (error) return { error: error.message };
+    setCoupons((prev) => prev.filter((c) => c.id !== id));
+    addAuditLog('coupon_deleted', 'coupon', id);
+    return { error: null };
+  };
+
+  const applyCoupon = async (code: string, cartTotal: number): Promise<{ coupon: CouponCode | null; discountAmount: number; error: string | null }> => {
+    const { data, error } = await supabase.from('discount_coupons')
+      .select('*').eq('code', code.toUpperCase()).eq('active', true).maybeSingle();
+    if (error) return { coupon: null, discountAmount: 0, error: error.message };
+    if (!data) return { coupon: null, discountAmount: 0, error: 'Cupón no encontrado' };
+    if (data.max_uses !== null && data.used_count >= data.max_uses) return { coupon: null, discountAmount: 0, error: 'Cupón agotado' };
+    const discount = Math.round(cartTotal * Number(data.discount_percent) / 100);
+    return { coupon: {
+      id: data.id, tenantId: data.tenant_id, code: data.code, description: data.description ?? undefined,
+      discountPercent: Number(data.discount_percent), maxUses: data.max_uses, usedCount: data.used_count,
+      active: data.active, createdBy: data.created_by, createdAt: data.created_at, updatedAt: data.updated_at,
+    }, discountAmount: discount, error: null };
+  };
+
+  const addAuditLog = (action: string, entityType?: string, entityId?: string, details?: Record<string, unknown>) => {
+    if (!currentTenant) return;
+    const log: AuditLog = {
+      id: `al-${Date.now()}`, tenantId: currentTenant.id, userId: currentUser.id,
+      userName: currentUser.name, action, entityType, entityId, details,
+      createdAt: new Date().toISOString(),
+    };
+    setAuditLogs((prev) => [log, ...prev]);
+    supabase.from('audit_logs').insert({
+      tenant_id: currentTenant.id, user_id: currentUser.id, user_name: currentUser.name,
+      action, entity_type: entityType, entity_id: entityId, details: details ?? null,
+    }).then(({ error }) => { if (error) console.error('Audit log error:', error); });
+  };
+
+  const updateEmployeePermissions = async (profileId: string, perms: Partial<Pick<EmployeePermissions, 'canDiscount' | 'canSeeCost'>>): Promise<{ error: string | null }> => {
+    if (!currentTenant) return { error: 'Sin negocio activo' };
+    const { error } = await supabase.from('employee_permissions').upsert({
+      tenant_id: currentTenant.id, profile_id: profileId,
+      can_discount: perms.canDiscount ?? false, can_see_cost: perms.canSeeCost ?? false,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'tenant_id,profile_id' });
+    if (error) return { error: error.message };
+    setEmployeePermissions((prev) => {
+      const idx = prev.findIndex((p) => p.profileId === profileId);
+      const newPerm: EmployeePermissions = {
+        id: idx >= 0 ? prev[idx].id : `ep-${Date.now()}`, tenantId: currentTenant.id, profileId,
+        canDiscount: perms.canDiscount ?? prev[idx]?.canDiscount ?? false,
+        canSeeCost: perms.canSeeCost ?? prev[idx]?.canSeeCost ?? false,
+        updatedAt: new Date().toISOString(),
+      };
+      return idx >= 0 ? prev.map((p) => p.profileId === profileId ? newPerm : p) : [newPerm, ...prev];
+    });
+    return { error: null };
   };
 
   const value: AppContextValue = {
@@ -670,6 +830,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     addReception, addCredit, toggleTenantStatus, threads, messages, sendMessage,
     warnings, pushWarning, clearWarning, loading,
     tasks, addTask, completeTask, broadcastMessages, addBroadcast, createEmployee, createBoss,
+    updateEmployee, toggleTenantStatusWithTrial, impersonateTenant, stopImpersonation, impersonating,
+    coupons, addCoupon, updateCoupon, deleteCoupon, applyCoupon,
+    auditLogs, addAuditLog, employeePermissions, updateEmployeePermissions,
     updateLastSeen, planLimit, stockMovements, addCashClose, cashCloses, refreshData,
   };
 

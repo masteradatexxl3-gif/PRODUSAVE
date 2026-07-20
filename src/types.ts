@@ -204,3 +204,38 @@ export interface CashClose {
   notes: string;
   createdAt: string;
 }
+
+export interface CouponCode {
+  id: string;
+  tenantId: string;
+  code: string;
+  description?: string;
+  discountPercent: number;
+  maxUses?: number | null;
+  usedCount: number;
+  active: boolean;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuditLog {
+  id: string;
+  tenantId: string;
+  userId?: string;
+  userName: string;
+  action: string;
+  entityType?: string;
+  entityId?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface EmployeePermissions {
+  id: string;
+  tenantId: string;
+  profileId: string;
+  canDiscount: boolean;
+  canSeeCost: boolean;
+  updatedAt: string;
+}

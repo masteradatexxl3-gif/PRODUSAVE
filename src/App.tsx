@@ -17,6 +17,7 @@ import { BossCredits } from './views/boss/BossCredits';
 import { BossChat } from './views/boss/BossChat';
 import { BossTasks } from './views/boss/BossTasks';
 import { BossEmployees } from './views/boss/BossEmployees';
+import { BossCoupons } from './views/boss/BossCoupons';
 import { BossStockHistory } from './views/boss/BossStockHistory';
 import { EmployeePOS } from './views/employee/EmployeePOS';
 import { EmployeeHistory } from './views/employee/EmployeeHistory';
@@ -27,7 +28,7 @@ import { Loader2 } from 'lucide-react';
 
 function Shell() {
   const { user: authUser, loading: authLoading } = useAuth();
-  const { role, currentTenant, theme, loading: appLoading } = useApp();
+  const { role, currentTenant, theme, loading: appLoading, impersonating, stopImpersonation } = useApp();
   const [view, setView] = useState<ViewId>(
     role === 'superadmin' ? 'sa-clients' : role === 'boss' ? 'boss-dashboard' : 'emp-pos'
   );
@@ -35,7 +36,7 @@ function Shell() {
 
   useEffect(() => {
     setView(role === 'superadmin' ? 'sa-clients' : role === 'boss' ? 'boss-dashboard' : 'emp-pos');
-  }, [role]);
+  }, [role, impersonating]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -63,6 +64,7 @@ function Shell() {
       case 'boss-tasks': return <BossTasks />;
       case 'boss-stock-history': return <BossStockHistory />;
       case 'boss-employees': return <BossEmployees />;
+      case 'boss-coupons': return <BossCoupons />;
       case 'emp-pos': return <EmployeePOS />;
       case 'emp-history': return <EmployeeHistory />;
       case 'emp-chat': return <EmployeeChat />;
@@ -92,6 +94,12 @@ function Shell() {
       />
       <div className="flex-1 flex flex-col min-w-0">
         <TopBar view={view} onOpenSidebar={() => setMobileSidebarOpen(true)} />
+        {impersonating && (
+          <div className="flex items-center justify-between px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 text-sm text-amber-600 dark:text-amber-400">
+            <span className="font-semibold">Modo impersonación activo — viendo el negocio como Jefe</span>
+            <button onClick={stopImpersonation} className="flex items-center gap-1 px-3 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 font-semibold text-xs">Salir</button>
+          </div>
+        )}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           {appLoading ? (
             <div className="h-full flex items-center justify-center">
