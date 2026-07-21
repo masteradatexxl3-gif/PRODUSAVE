@@ -73,26 +73,15 @@ Deno.serve(async (req: Request) => {
       const days = trialDays ?? 14;
       const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
-      // 1. Create auth user
-      const { data: authData, error: authErr } = await admin.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-      });
-      if (authErr) {
-        return new Response(JSON.stringify({ error: authErr.message }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      const userId = authData.user.id;
+      // STEP 1: Create tenant FIRST (before auth user) so FK on profiles.tenant_id is satisfied
+      const baseSlug = businessName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "negocio";
+      const uniqueSlug = `${baseSlug}-${Math.random().toString(36).substring(2, 8)}`;
 
-      // 2. Create tenant
       const { data: tenantRow, error: tenantErr } = await admin
         .from("tenants")
         .insert({
           name: businessName,
-          slug: businessName.toLowerCase().replace(/\s+/g, "-"),
+          slug: uniqueSlug,
           primary_color: "#5865F2",
           accent_color: "#5865F2",
           logo_emoji: "🛒",
@@ -103,25 +92,46 @@ Deno.serve(async (req: Request) => {
         })
         .select()
         .single();
+
       if (tenantErr || !tenantRow) {
-        // rollback auth user
-        await admin.auth.admin.deleteUser(userId);
         return new Response(JSON.stringify({ error: tenantErr?.message ?? "Error al crear negocio" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
-      // 3. Create profile as boss
+      const newTenantId = tenantRow.id;
+
+      // STEP 2: Create auth user with service role (bypasses RLS, doesn't affect caller's session)
+      const { data: authData, error: authErr } = await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+
+      if (authErr) {
+        // Rollback: delete the tenant we just created
+        await admin.from("tenants").delete().eq("id", newTenantId);
+        return new Response(JSON.stringify({ error: authErr.message }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const userId = authData.user.id;
+
+      // STEP 3: Create profile linking auth user to tenant with role 'boss'
       const { error: profErr } = await admin.from("profiles").insert({
         id: userId,
-        tenant_id: tenantRow.id,
+        tenant_id: newTenantId,
         name,
         role: "boss",
         active: true,
       });
+
       if (profErr) {
-        await admin.from("tenants").delete().eq("id", tenantRow.id);
+        // Rollback: delete tenant AND auth user
+        await admin.from("tenants").delete().eq("id", newTenantId);
         await admin.auth.admin.deleteUser(userId);
         return new Response(JSON.stringify({ error: profErr.message }), {
           status: 500,
@@ -129,7 +139,7 @@ Deno.serve(async (req: Request) => {
         });
       }
 
-      return new Response(JSON.stringify({ success: true, tenantId: tenantRow.id, userId }), {
+      return new Response(JSON.stringify({ success: true, tenantId: newTenantId, userId }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -137,6 +147,21 @@ Deno.serve(async (req: Request) => {
     if (body.action === "create_employee") {
       const { name, email, password, tenantId } = body as CreateEmployeeBody;
 
+      // Verify tenant exists first
+      const { data: tenantCheck, error: tenantCheckErr } = await admin
+        .from("tenants")
+        .select("id")
+        .eq("id", tenantId)
+        .maybeSingle();
+
+      if (tenantCheckErr || !tenantCheck) {
+        return new Response(JSON.stringify({ error: "El negocio especificado no existe" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Step 1: Create auth user
       const { data: authData, error: authErr } = await admin.auth.admin.createUser({
         email,
         password,
@@ -150,6 +175,7 @@ Deno.serve(async (req: Request) => {
       }
       const userId = authData.user.id;
 
+      // Step 2: Create profile
       const { error: profErr } = await admin.from("profiles").insert({
         id: userId,
         tenant_id: tenantId,
