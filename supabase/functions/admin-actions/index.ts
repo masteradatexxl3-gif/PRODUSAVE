@@ -6,6 +6,18 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// Decode a JWT payload (no verification — verification is handled by Supabase's JWT check on the function itself)
+function decodeJwt(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
 interface CreateBossBody {
   action: "create_boss";
   name: string;
@@ -48,32 +60,43 @@ Deno.serve(async (req: Request) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const anonKey = req.headers.get("Authorization")?.replace("Bearer ", "") ?? "";
 
-    // Verify caller is super_admin using anon key (respects RLS)
-    const callerClient = createClient(supabaseUrl, anonKey);
-    const { data: callerProfile, error: callerErr } = await callerClient
+    // Extract caller's user ID from the JWT in the Authorization header
+    const authHeader = req.headers.get("Authorization") ?? "";
+    const token = authHeader.replace("Bearer ", "");
+    const payload = decodeJwt(token);
+    const callerUserId = (payload?.sub as string) ?? "";
+
+    if (!callerUserId) {
+      return new Response(JSON.stringify({ error: "Token de autenticación inválido" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Use service role client to look up the caller's profile (bypasses RLS)
+    const admin = createClient(supabaseUrl, serviceKey);
+    const { data: callerProfile, error: callerErr } = await admin
       .from("profiles")
       .select("id, role, tenant_id")
-      .eq("id", (await callerClient.auth.getUser()).data.user?.id ?? "")
+      .eq("id", callerUserId)
       .maybeSingle();
 
     if (callerErr || !callerProfile || callerProfile.role !== "super_admin") {
-      return new Response(JSON.stringify({ error: "No autorizado" }), {
+      return new Response(JSON.stringify({ error: "No autorizado — se requiere Super Admin" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const body = (await req.json()) as Body;
-    const admin = createClient(supabaseUrl, serviceKey);
 
     if (body.action === "create_boss") {
       const { name, email, password, businessName, plan, trialDays } = body as CreateBossBody;
       const days = trialDays ?? 14;
       const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
-      // STEP 1: Create tenant FIRST (before auth user) so FK on profiles.tenant_id is satisfied
+      // STEP 1: Create tenant FIRST so the FK profiles.tenant_id_fkey is satisfied
       const baseSlug = businessName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "negocio";
       const uniqueSlug = `${baseSlug}-${Math.random().toString(36).substring(2, 8)}`;
 
@@ -110,7 +133,7 @@ Deno.serve(async (req: Request) => {
       });
 
       if (authErr) {
-        // Rollback: delete the tenant we just created
+        // Rollback: delete the tenant
         await admin.from("tenants").delete().eq("id", newTenantId);
         return new Response(JSON.stringify({ error: authErr.message }), {
           status: 400,

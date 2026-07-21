@@ -663,9 +663,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const callAdminAction = async (body: Record<string, unknown>): Promise<{ error: string | null; data?: Record<string, unknown> }> => {
     try {
       const { data: session } = await supabase.auth.getSession();
+      const accessToken = session.session?.access_token ?? '';
+      if (!accessToken) return { error: 'No hay sesión activa. Iniciá sesión nuevamente.' };
       const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-actions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.session?.access_token ?? ''}` },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+        },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
