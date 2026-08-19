@@ -389,15 +389,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       })));
 
       // Audit logs
-      let auditQuery = supabase.from('audit_logs').select('*');
-      if (!isSuperAdmin) auditQuery = auditQuery.eq('tenant_id', tenantId);
-      const { data: auditData } = await auditQuery.order('created_at', { ascending: false }).limit(200);
-      setAuditLogs((auditData ?? []).map((a) => ({
-        id: a.id, tenantId: a.tenant_id, userId: a.user_id, userName: a.user_name,
-        action: a.action, entityType: a.entity_type, entityId: a.entity_id,
-        details: a.details, createdAt: a.created_at,
-      })));
+    let auditQuery = supabase.from('audit_logs').select('*');
+    if (!isSuperAdmin) auditQuery = auditQuery.eq('tenant_id', tenantId);
+    const { data: auditData } = await auditQuery.order('created_at', { ascending: false }).limit(200);
+    setAuditLogs((auditData ?? []).map((a) => ({
+      id: a.id, tenantId: a.tenant_id, userId: a.user_id, userName: a.user_name,
+      action: a.action, entityType: a.entity_type, entityId: a.entity_id,
+      details: a.details, createdAt: a.created_at
+    })));
 
+  } catch (e) {
+    console.error('Error cargando datos:', e);
+  } finally {
+    initialLoadDone.current = true;
+    setLoading(false);
+  }
       // Employee permissions
       let permQuery = supabase.from('employee_permissions').select('*');
       if (!isSuperAdmin) permQuery = permQuery.eq('tenant_id', tenantId);
